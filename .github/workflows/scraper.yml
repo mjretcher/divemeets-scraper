@@ -1,0 +1,145 @@
+name: DiveMeets Scraper
+
+on:
+  schedule:
+    # Every Monday at 6:00 AM UTC (1:00 AM ET / midnight CT)
+    - cron: "0 6 * * 1"
+
+  workflow_dispatch:
+    inputs:
+      year:
+        description: "Season year to scrape (leave blank for all years 2018-present)"
+        required: false
+        type: string
+      org:
+        description: "Organization to scrape"
+        required: false
+        default: "both"
+        type: choice
+        options:
+          - both
+          - ncaa
+          - usa
+      phase:
+        description: "Run a specific phase only (1=meets, 2=events, 3=results, 4=profiles, 5=dives, 6=standings)"
+        required: false
+        type: string
+      skip_dive_sheets:
+        description: "Skip dive sheet scraping (faster run)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write   # needed to commit updated DBs back to repo
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300   # 5 hours max — historical backfills take time
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true   # in case you store DBs with Git LFS (recommended for large files)
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run scraper (scheduled — all orgs, current year + recent)
+        if: github.event_name == 'schedule'
+        run: |
+          # On scheduled runs: scrape current year + previous year to catch late results
+          CURRENT_YEAR=$(date +%Y)
+          PREV_YEAR=$((CURRENT_YEAR - 1))
+          echo "Scraping NCAA and USA Diving for $PREV_YEAR and $CURRENT_YEAR"
+          python -m scraper.main --year $CURRENT_YEAR --no-dive-sheets
+          python -m scraper.main --year $PREV_YEAR --no-dive-sheets
+        env:
+          PYTHONPATH: .
+
+      - name: Run scraper (manual — use workflow inputs)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          CMD="python -m scraper.main"
+
+          if [ -n "${{ github.event.inputs.year }}" ]; then
+            CMD="$CMD --year ${{ github.event.inputs.year }}"
+          fi
+
+          if [ "${{ github.event.inputs.org }}" != "both" ] && [ -n "${{ github.event.inputs.org }}" ]; then
+            CMD="$CMD --org ${{ github.event.inputs.org }}"
+          fi
+
+          if [ -n "${{ github.event.inputs.phase }}" ]; then
+            CMD="$CMD --phase ${{ github.event.inputs.phase }}"
+          fi
+
+          if [ "${{ github.event.inputs.skip_dive_sheets }}" = "true" ]; then
+            CMD="$CMD --no-dive-sheets"
+          fi
+
+          echo "Running: $CMD"
+          $CMD
+        env:
+          PYTHONPATH: .
+
+      - name: Show DB sizes
+        if: always()
+        run: |
+          echo "=== Database sizes ==="
+          find data/ -name "*.db" -exec du -sh {} \; 2>/dev/null | sort -h || echo "No databases found yet"
+          echo ""
+          echo "=== Row counts ==="
+          for db in data/*.db; do
+            if [ -f "$db" ]; then
+              echo "--- $db ---"
+              sqlite3 "$db" "
+                SELECT 'meets:' || COUNT(*) FROM meets;
+                SELECT 'events:' || COUNT(*) FROM events;
+                SELECT 'results:' || COUNT(*) FROM results;
+                SELECT 'divers:' || COUNT(*) FROM divers;
+                SELECT 'dive_sheets:' || COUNT(*) FROM dive_sheets;
+                SELECT 'team_standings:' || COUNT(*) FROM team_standings;
+              " 2>/dev/null || true
+            fi
+          done
+
+      - name: Commit updated databases
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Add all DB files in data/
+          git add data/*.db 2>/dev/null || true
+
+          # Only commit if there are changes
+          if git diff --cached --quiet; then
+            echo "No database changes to commit"
+          else
+            TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
+            git commit -m "chore: update DiveMeets data [$TIMESTAMP]"
+            git push
+          fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NOTES ON GIT LFS (recommended for large DB files):
+#
+# SQLite files grow fast. For 7 years × 2 orgs, expect 200MB–2GB total.
+# To avoid bloating your git history:
+#
+#   1. Install Git LFS: https://git-lfs.github.com/
+#   2. In your repo: git lfs track "*.db"
+#   3. Commit the .gitattributes file
+#   4. Enable LFS in your GitHub repo settings
+#
+# Then this workflow will handle LFS automatically (lfs: true is set above).
+# ─────────────────────────────────────────────────────────────────────────────
