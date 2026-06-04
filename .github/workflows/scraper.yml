@@ -2,17 +2,19 @@ name: DiveMeets Scraper
 
 on:
   schedule:
-    - cron: '0 6 * * *'  # Runs daily at 6am UTC
-  workflow_dispatch:      # Allow manual triggering
+    - cron: '0 10 * * 3'   # Weekly, Wednesdays 10 AM UTC (results posted by then)
+  workflow_dispatch:        # Manual trigger from Actions tab
 
 jobs:
   scrape-usa:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout scraper repo
+      - name: Checkout
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -20,22 +22,29 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run USA scraper
-        run: python scraper.py --org usa
+      - name: Install Playwright browsers
+        run: playwright install chromium --with-deps
 
-      - name: Upload USA database
-        uses: actions/upload-artifact@v4
-        with:
-          name: usa-db
-          path: data/usa_*.db
+      - name: Run USA scraper (meets + events + results, skip dive sheets)
+        run: python -m scraper.main --year 2026 --org usa --no-dive-sheets
+
+      - name: Commit updated database
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/usa_2026.db
+          git diff --staged --quiet || git commit -m "scrape: update usa_2026.db $(date -u '+%Y-%m-%d')"
+          git push
 
   scrape-ncaa:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout scraper repo
+      - name: Checkout
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -43,61 +52,16 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run NCAA scraper
-        run: python scraper.py --org ncaa
+      - name: Install Playwright browsers
+        run: playwright install chromium --with-deps
 
-      - name: Upload NCAA database
-        uses: actions/upload-artifact@v4
-        with:
-          name: ncaa-db
-          path: data/ncaa_*.db
+      - name: Run NCAA scraper (meets + events + results, skip dive sheets)
+        run: python -m scraper.main --year 2026 --org ncaa --no-dive-sheets
 
-  build-and-push:
-    runs-on: ubuntu-latest
-    needs: [scrape-usa, scrape-ncaa]
-    steps:
-      - name: Checkout scraper repo
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Download USA database
-        uses: actions/download-artifact@v4
-        with:
-          name: usa-db
-          path: data/
-
-      - name: Download NCAA database
-        uses: actions/download-artifact@v4
-        with:
-          name: ncaa-db
-          path: data/
-
-      - name: Build JS data files
-        run: python build_data_js.py
-
-      - name: Checkout apps repo
-        uses: actions/checkout@v4
-        with:
-          repository: mjretcher/usa-diving-staff-apps
-          token: ${{ secrets.APPS_REPO_TOKEN }}
-          path: apps-repo
-
-      - name: Copy JS files to apps repo
-        run: |
-          cp js/data_*.js apps-repo/js/
-
-      - name: Commit and push to apps repo
-        working-directory: apps-repo
+      - name: Commit updated database
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add js/data_*.js
-          git diff --staged --quiet || git commit -m "Auto-update dive data $(date -u '+%Y-%m-%d')"
+          git add data/ncaa_2026.db
+          git diff --staged --quiet || git commit -m "scrape: update ncaa_2026.db $(date -u '+%Y-%m-%d')"
           git push

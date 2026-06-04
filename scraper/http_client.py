@@ -1,81 +1,100 @@
 """
 scraper/http_client.py
-Shared HTTP session with rate limiting, retry, and polite headers.
-DiveMeets uses PHP/CGI pages — no JS rendering needed.
+Shared HTTP client using Playwright to bypass Cloudflare JS challenges.
+A single persistent browser context is reused across all requests.
 """
 import time
 import logging
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+import atexit
+from playwright.sync_api import sync_playwright, Page, BrowserContext
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://secure.meetcontrol.com/divemeets/system"
 
-# Polite headers — identify as a research bot
-HEADERS = {
-    "User-Agent": "DiveMeets-Research-Bot/1.0 (diving analytics; respectful crawler)",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-}
-
-# Seconds between requests — be polite to DiveMeets servers
 REQUEST_DELAY = 1.5
 
-
-def make_session() -> requests.Session:
-    """Build a requests session with retry logic."""
-    session = requests.Session()
-    session.headers.update(HEADERS)
-
-    retry = Retry(
-        total=4,
-        backoff_factor=2,           # 1s, 2s, 4s, 8s
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"],
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    return session
-
-
-_session = make_session()
+_playwright = None
+_browser = None
+_context: BrowserContext = None
+_page: Page = None
 _last_request_time = 0.0
 
 
-def get(path: str, params: dict = None, full_url: str = None, timeout: int = 30) -> requests.Response | None:
-    """
-    GET a DiveMeets page with rate limiting.
-    Pass `path` for standard BASE_URL paths, or `full_url` to override.
-    Returns Response or None on failure.
-    """
+def _init():
+    global _playwright, _browser, _context, _page
+    if _page is not None:
+        return
+    logger.info("Launching Playwright browser...")
+    _playwright = sync_playwright().start()
+    _browser = _playwright.chromium.launch(headless=True)
+    _context = _browser.new_context(
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        viewport={"width": 1280, "height": 800},
+    )
+    _page = _context.new_page()
+    logger.info("Browser ready.")
+
+
+def _shutdown():
+    global _playwright, _browser, _context, _page
+    try:
+        if _page:
+            _page.close()
+        if _context:
+            _context.close()
+        if _browser:
+            _browser.close()
+        if _playwright:
+            _playwright.stop()
+    except Exception:
+        pass
+    _page = _context = _browser = _playwright = None
+
+
+atexit.register(_shutdown)
+
+
+def get_html(path: str, params: dict = None, full_url: str = None) -> str | None:
     global _last_request_time
+    _init()
 
-    url = full_url if full_url else f"{BASE_URL}/{path}"
+    if full_url:
+        url = full_url
+    else:
+        url = f"{BASE_URL}/{path}"
+        if params:
+            qs = "&".join(f"{k}={v}" for k, v in params.items())
+            url = f"{url}?{qs}"
 
-    # Enforce delay between requests
     elapsed = time.time() - _last_request_time
     if elapsed < REQUEST_DELAY:
         time.sleep(REQUEST_DELAY - elapsed)
 
     try:
-        resp = _session.get(url, params=params, timeout=timeout)
+        response = _page.goto(url, wait_until="domcontentloaded", timeout=30_000)
         _last_request_time = time.time()
 
-        if resp.status_code == 200:
-            return resp
-        else:
-            logger.warning(f"HTTP {resp.status_code} for {url}")
+        if response is None or not response.ok:
+            status = response.status if response else "no response"
+            logger.warning(f"HTTP {status} for {url}")
             return None
-    except requests.RequestException as e:
+
+        # Wait briefly for Cloudflare challenge to resolve if needed
+        if "just a moment" in _page.title().lower():
+            logger.info("Cloudflare challenge detected, waiting...")
+            _page.wait_for_function(
+                "() => !document.title.toLowerCase().includes('just a moment')",
+                timeout=15_000,
+            )
+
+        return _page.content()
+
+    except Exception as e:
         logger.error(f"Request failed for {url}: {e}")
         _last_request_time = time.time()
         return None
-
-
-def get_html(path: str, params: dict = None, full_url: str = None) -> str | None:
-    """Convenience: returns response text or None."""
-    resp = get(path, params=params, full_url=full_url)
-    return resp.text if resp else None
