@@ -22,9 +22,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Install Playwright browsers
+        run: playwright install chromium --with-deps
+
       - name: Run USA scraper (meets + events + results, skip dive sheets)
-        env:
-          BRIGHTDATA_API_KEY: ${{ secrets.BRIGHTDATA_API_KEY }}
         run: python -m scraper.main --year 2026 --org usa --no-dive-sheets
 
       - name: Commit updated database
@@ -51,9 +52,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Install Playwright browsers
+        run: playwright install chromium --with-deps
+
       - name: Run NCAA scraper (meets + events + results, skip dive sheets)
-        env:
-          BRIGHTDATA_API_KEY: ${{ secrets.BRIGHTDATA_API_KEY }}
         run: python -m scraper.main --year 2026 --org ncaa --no-dive-sheets
 
       - name: Commit updated database
