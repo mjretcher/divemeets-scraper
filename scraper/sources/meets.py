@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 scraper/sources/meets.py
 Discovers NCAA D1 and USA Diving meets on DiveMeets by scanning sequential

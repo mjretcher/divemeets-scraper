@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 scraper/sources/standings.py
 Scrapes team standings from a meet.

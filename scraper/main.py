@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 scraper/main.py
 Main orchestrator for the DiveMeets scraper.

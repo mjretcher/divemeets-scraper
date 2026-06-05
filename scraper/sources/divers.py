@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 scraper/sources/divers.py
 Scrapes full diver profiles from DiveMeets.

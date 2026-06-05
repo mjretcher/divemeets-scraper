@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 scraper/sources/dive_sheets.py
 Scrapes individual dive-level data for each diver in each event.

@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 scraper/sources/results.py
 Scrapes per-diver results for each event.
