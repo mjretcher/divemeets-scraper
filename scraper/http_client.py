@@ -1,68 +1,60 @@
 """
 scraper/http_client.py
-Shared HTTP client using Playwright to bypass Cloudflare JS challenges.
-A single persistent browser context is reused across all requests.
+HTTP client that routes all requests through Bright Data's Web Unlocker API,
+bypassing Cloudflare and other bot-detection on DiveMeets.
+
+Requires env var:  BRIGHTDATA_API_KEY
+Optional env var:  BRIGHTDATA_ZONE  (default: cli_unlocker)
 """
+import os
 import time
 import logging
-import atexit
-from playwright.sync_api import sync_playwright, Page, BrowserContext
+from typing import Optional
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://secure.meetcontrol.com/divemeets/system"
 
+# Polite delay between requests (seconds)
 REQUEST_DELAY = 1.5
 
-_playwright = None
-_browser = None
-_context: BrowserContext = None
-_page: Page = None
+# Bright Data Web Unlocker endpoint
+_BD_ENDPOINT = "https://api.brightdata.com/request"
+_BD_ZONE = os.environ.get("BRIGHTDATA_ZONE", "cli_unlocker")
+
+
+def _make_session() -> requests.Session:
+    session = requests.Session()
+    retry = Retry(
+        total=4,
+        backoff_factor=2,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["POST"],
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    return session
+
+
+_session = _make_session()
 _last_request_time = 0.0
 
 
-def _init():
-    global _playwright, _browser, _context, _page
-    if _page is not None:
-        return
-    logger.info("Launching Playwright browser...")
-    _playwright = sync_playwright().start()
-    _browser = _playwright.chromium.launch(headless=True)
-    _context = _browser.new_context(
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        viewport={"width": 1280, "height": 800},
-    )
-    _page = _context.new_page()
-    logger.info("Browser ready.")
-
-
-def _shutdown():
-    global _playwright, _browser, _context, _page
-    try:
-        if _page:
-            _page.close()
-        if _context:
-            _context.close()
-        if _browser:
-            _browser.close()
-        if _playwright:
-            _playwright.stop()
-    except Exception:
-        pass
-    _page = _context = _browser = _playwright = None
-
-
-atexit.register(_shutdown)
-
-
-def get_html(path: str, params: dict = None, full_url: str = None) -> str | None:
+def get_html(path: str, params: dict = None, full_url: str = None) -> Optional[str]:
     global _last_request_time
-    _init()
 
+    api_key = os.environ.get("BRIGHTDATA_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "BRIGHTDATA_API_KEY environment variable is not set. "
+            "Get your key from https://brightdata.com/cp/setting and set it "
+            "as a GitHub Actions secret named BRIGHTDATA_API_KEY."
+        )
+
+    # Build target URL
     if full_url:
         url = full_url
     else:
@@ -71,30 +63,27 @@ def get_html(path: str, params: dict = None, full_url: str = None) -> str | None
             qs = "&".join(f"{k}={v}" for k, v in params.items())
             url = f"{url}?{qs}"
 
+    # Enforce polite delay
     elapsed = time.time() - _last_request_time
     if elapsed < REQUEST_DELAY:
         time.sleep(REQUEST_DELAY - elapsed)
 
     try:
-        response = _page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+        resp = _session.post(
+            _BD_ENDPOINT,
+            json={"zone": _BD_ZONE, "url": url, "format": "raw"},
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=60,
+        )
         _last_request_time = time.time()
 
-        if response is None or not response.ok:
-            status = response.status if response else "no response"
-            logger.warning(f"HTTP {status} for {url}")
+        if resp.status_code == 200:
+            return resp.text
+        else:
+            logger.warning(f"Bright Data returned HTTP {resp.status_code} for {url}: {resp.text[:200]}")
             return None
 
-        # Wait briefly for Cloudflare challenge to resolve if needed
-        if "just a moment" in _page.title().lower():
-            logger.info("Cloudflare challenge detected, waiting...")
-            _page.wait_for_function(
-                "() => !document.title.toLowerCase().includes('just a moment')",
-                timeout=15_000,
-            )
-
-        return _page.content()
-
-    except Exception as e:
+    except requests.RequestException as e:
         logger.error(f"Request failed for {url}: {e}")
         _last_request_time = time.time()
         return None
